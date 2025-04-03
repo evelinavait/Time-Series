@@ -1,0 +1,497 @@
+---
+title: "Laiko eilutės: praktinis atsiskaitymas"
+author: "Evelina Vaitkevičiūtė"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+```
+
+## Programinė įranga ir bibliotekos
+```{r}
+sessionInfo()
+
+suppressPackageStartupMessages({
+    suppressWarnings({
+        library(tidyverse)
+        library(forecast)
+        library(ggplot2)
+        library(data.table)
+        library(moments)
+        library(quantmod)
+        library(rugarch)
+        library(nortsTest)
+        library(FinTS)
+        })
+    })
+```
+
+<!-- R.version.string -->
+
+## Duomenų parsiuntimas
+
+Žemiau pateikiamas kodas, nurodant studento kodą `STUDENT_CODE = X`:
+
+```{r message=FALSE}
+getData <- function(s_code){
+  set.seed(s_code)
+  symbols_stocks <- c("NVDA", "INTC", "AMD", "META", "AAPL", "MSFT",
+                   "IBM", "NFLX", "GOOGL", "AMZN", "EBAY", "BABA",
+                   "DIS", "TSLA", "KO", "PEP", "ADBE",
+                   "AAL", "HPQ", "MCD", "NDAQ") 
+  my_symbols <- c(sample(symbols_stocks, 1))
+  print(paste0("Simboliai: ", sub("\\^", "", my_symbols))) 
+  #
+  library(quantmod)
+  for(var_names in my_symbols){
+    # Get the symbol:
+    getSymbols(var_names,  auto.assign = TRUE,
+               src  = "yahoo", 
+               from = "2015-01-01", 
+               to   = "2023-06-25")
+    # Automatically remove missing data from the variable:
+    assign(gsub("\\^", "", var_names), na.omit(get(gsub("\\^", "", var_names))))
+  }
+  return(get(var_names))
+}
+DT <- getData(X)
+saveRDS(DT, "./laiko_eiluciu_duom.RDS")
+```
+**SIMBOLIS** MCD - **ĮMONĖ** Mcdonald’s Corp.
+
+## Pradinė analizė
+Laikykime, kad: \
+laikas yra nuoseklus (t.y. ignoruokime nedarbo dienas ir laikotarpius su tuščiomis (`NA`) reikšmėmis), \
+ignoruokime valiutų kurso efektus, \
+$P^{(F)}_{t}$ - nagrinėjamos įmonės akcijų **uždarymo** kaina (angl. *closing price*) laiko momentu $t$.
+
+
+##### Pasirenkamos tik tos DT eilutės, kurios neturi `NA` reikšmių. 
+```{r}
+DT <- DT[rowSums(is.na(DT)) == 0]
+```
+
+##### DT rinkinys:
+```{r}
+head(DT)
+```
+##### Duomenų rinkinio stulpelių pavadinimai:
+```{r}
+ls(DT)
+```
+
+##### Aprašomoji statistika
+```{r}
+summary(DT)
+```
+## Duomenų filtravimas ir paruošimas analizei
+```{r}
+DT_old <- copy(DT)
+
+cols <- grep(".Close", colnames(DT), value = TRUE)
+cols
+DT <- data.frame(time = index(DT), value = DT[, cols])
+DT <- as.data.table(DT)
+
+DT <- DT[rowSums(is.na(DT)) == 0]
+```
+
+## Duomenų transformacija iš akcijų kainos į akcijų grąžą
+Pasinaudojus įmonės akcijų ir akcijų indekso simbolių uždarymo kainomis apskaičiuojamos paprastosios grąžos (angl. *simple returns*). Paprastosios grąžos išreiškiamos logaritmuota išraiška ir toliau analizuojamos logaritmuotos grąžos (angl. *log-returns*).
+
+
+Apibendrinant - paprastoji grąža rodo kainos pokytį, lyginant su praeitu laiko momentu; kainų pokytis per periodą (per dieną, dienos eina nuosekliai. Formulė:
+
+$L_{t}\equiv \frac{V_{t+1}}{V_{t}} - 1$
+
+Logaritminė grąža (jei pokyčiai būna nedideli) dažnai rodo panašaus dydžio reikšmes ir dėl to dažnai interpretuojama kaip kainos pokytis. Formulė:
+
+$C_{t}\equiv \ln\left( \frac{V_{t+1}}{V_{t}} \right)$
+
+```{r}
+DT[, c(gsub("Close", "r.simple", cols)) := lapply(.SD, function(x){x / shift(x, n = 1, type = "lag") - 1}), .SDcols = cols]
+
+DT[, c(gsub("Close", "r.log", cols)) := lapply(.SD, function(x){log(x) - shift(log(x), n = 1, type = "lag")}), .SDcols = cols]
+```
+
+
+```{r}
+DT[, c("time", grep("simple|log", colnames(DT), value = TRUE)), with = FALSE] %>% head(5)
+```
+
+Alternatyvus sprendimas, naudojant `quantmod` biblioteką:
+```{r}
+DT$Simple_return <- Delt(DT$MCD.Close, type = "arithmetic")
+DT$Log_return <- Delt(DT$MCD.Close, type = "log")
+```
+
+Panaikinama pirmosios reikšmės (eilutė), kadangi skaičiuojant grąžas pačią pirmą dieną neturime prieš tai buvusios vertės.
+```{r}
+DT <- DT[-1, ]
+```
+
+```{r}
+DT[, c("time", grep("simple|log", colnames(DT), value = TRUE)), with = FALSE] %>% head(5)
+```
+
+##### Paprastųjų ir logaritminių grąžų vizualizavimas
+
+Iš grafiko matome, kad ten, kur yra didesni skirtumai, ten labiau išsiskiria paprastųjų ir logaritminių grąžos. Logaritmuodami bandome užtikrinti, kad grąžos būtų arčiau normaliojo skirstinio ir būtų mažiau ekstremalių reikšmių, tai palengvina darbą, darant prielaidas: Inovacijos turi normalųjį skirstinį su 0 vidurkiu ir 1 dispersija.
+
+```{r}
+options(repr.plot.width = 15, repr.plot.height = 15, repr.plot.res = 200)
+
+DT[, c("time", grep("simple|log", colnames(DT), value = TRUE)), with = FALSE] %>%
+  melt.data.table(id.vars = "time") %>%
+  .[, .(time, type = gsub("^.*\\.", "", variable), variable = gsub("\\..*", "", variable), value)] %>%
+  ggplot(aes(x=time, y = value, color=type, linetype=type)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~variable, scales = "free_y", ncol = 1) + theme_bw()
+```
+
+Toliau analizuojamos logaritmuotos grąžos.
+```{r}
+log_returns <- DT$MCD.r.log
+```
+
+## Logaritmuotų grąžų vidurkio, standartinio nuokrypio, asimetrijos ir eksceso koeficientų apskaičiavimas
+
+Vidurkis
+```{r}
+mean_log_returns <- mean(log_returns)
+cat("Vidurkis:", mean_log_returns)
+```
+
+Standartinis nuokrypis
+```{r}
+sd_log_returns <- sd(log_returns)
+cat("Standartinis nuokrypis:", sd_log_returns)
+```
+
+[Asimetrijos (angl. *skewness*) koeficientas](https://www.statology.org/skewness-kurtosis-in-r/)
+```{r}
+skewness_log_returns <- skewness(log_returns)
+cat("Asimetrijos koeficientas:", skewness_log_returns)
+```
+Kadangi asimetrijos koeficientas yra neigiamas, tai rodo, kad pasiskirstymas yra asimetriškas (left-skewed).
+
+[Eksceso (angl. *excess kurtosis*) koeficientas](https://www.statology.org/skewness-kurtosis-in-r/)
+```{r}
+kurtosis_log_returns <- kurtosis(log_returns)
+cat("Eksceso koeficientas:", kurtosis_log_returns)
+```
+
+Pavaizduojama logaritminių grąžų histograma:
+
+```{r}
+hist(log_returns,
+     col = "peachpuff",
+     border = "black",
+     prob = TRUE,
+     breaks = 50,
+     main = "Histogram and Density Plot of Log Returns",
+     xlab = "Log Returns")
+density_log_returns <- density(log_returns)
+lines(density_log_returns,
+      lwd = 2,
+      col = "chocolate3")
+rug(log_returns, col = "darkred")
+
+
+```
+
+
+## Statistinių testų atlikimas
+* Patikrinti ar vidurkis statistiškai reikšmingai nesiskiria nuo nulio: \
+$H_{0}:$ vidurkis nesiskiria nuo 0 \
+$H_{A}:$ vidurkis skiriasi nuo 0
+
+```{r}
+t.test(log_returns)
+```
+
+Kadangi p-value = 0.06423 > 0.05, negalime atmesti $H_{0}$ hipotezės. Vadinasi, vidurkis statistiškai reikšmingai nesiskiria nuo 0.
+
+* Patikrinti ar asimetrijos koeficientas statistiškai reikšmingai nesiskiria nuo nulio: \
+$H_{0}: S(r)=0$ (nėra asimetrijos) asimetrijos koeficientas nesiskiria nuo 0 \
+$H_{A}:$ asimetrijos koeficientas skiriasi nuo 0
+
+```{r}
+n <- length(log_returns[!is.na(log_returns)])
+skewness_test_statistic <- skewness_log_returns / (sqrt(6 / n))
+skewness_p_value <- 2 * (1 - pnorm(abs(skewness_test_statistic)))
+skewness_p_value
+
+moments::agostino.test(log_returns) # H_0: S(r) = 0
+```
+Kadangi  p-value = 3.990019e-09 < 0.05, $H_{0}$ hipotezę atmetame. Vadinasi, asimetrijos koeficientas skiriasi nuo 0.
+
+* Patikrinti ar eksceso koeficientas statistiškai reikšmingai nesiskiria nuo nulio: \
+$H_{0}: K(r)-3=0$ (nėra asimetrijos) eksceso koeficientas nesiskiria nuo 0 \
+$H_{A}:$ eksceso koeficientas skiriasi nuo 0
+
+```{r}
+n <- length(log_returns[!is.na(log_returns)])
+excess_kurtosis <- kurtosis_log_returns  - 3
+kurtosis_test_statistic <- excess_kurtosis / (sqrt(24 / n))
+kurtosis_p_value <- 2 * (1 - pnorm(abs(kurtosis_test_statistic)))
+kurtosis_p_value
+
+moments::anscombe.test(log_returns) # H_0: K(r) = 3
+```
+Kadangi  p-value = 0 < 0.05, $H_{0}$ hipotezę atmetame. Vadinasi, eksceso koeficientas skiriasi nuo 0.
+
+$H_{0}:$ duomenys atitinka normalųjį pasiskirstymą \
+$H_{A}:$ duomenys neatitinka normaliojo pasiskirstymo
+
+```{r}
+jarque.test(log_returns)
+```
+Kadangi  p-value = 2.2e-16 < 0.05, $H_{0}$ hipotezę atmetame. Vadinasi, duomenys neturi normaliojo pasiskirstymo.
+
+
+```{r}
+data.frame(time = 1:nrow(DT), r = log_returns) %>%
+  ggplot(aes(x = r)) + geom_density(aes(color = "r_t density (estimate)")) +
+  stat_function(aes(color = "theoretical normal distribution"), 
+                fun = dnorm, args = c(0, 1), n = 1000, xlim = c(-6, 6), show.legend = TRUE) +
+  theme_bw() + theme(legend.position = "bottom", legend.title = element_blank())
+```
+
+Matome, kad $r_{t}$ skirstinys nėra simetrinis.
+
+Bandant sudaryti modelį koeficientai nėra statistiškai reikšmingi, todėl sumažiname analizuojamų duomenų laikotarpį, pvz. pradžia nuo 2020 sausio mėn.
+
+```{r}
+DT[, time := as.Date(time)]
+DT_filtered <- DT[time >= as.Date("2020-01-01")]
+```
+
+Logaritminės grąžos, sumažinus analizuojamų duomenų laikotarpį:
+```{r}
+log_returns <- DT_filtered$MCD.r.log
+```
+
+## Laiko eilutės grafikas ir jos tyrimas
+
+Issibrėžiamas laiko eilutės grafikas ir ištiriama laiko eilutė (pačios laiko eilutės grafikas, ACF, PACF ir kiti grafikai, Ljung-box testas).
+
+
+<!-- # dt <- ts(log_returns, frequency = 252) -->
+<!-- # options(repr.plot.width = 10, repr.plot.height = 5, repr.plot.res = 200) -->
+<!-- # ggtsdisplay(dt, theme = theme_bw()) -->
+
+```{r}
+forecast::ggtsdisplay(DT_filtered$MCD.r.log, theme = theme_bw())
+```
+
+Vidurkis 0, dispersija - yra tam tikrų periodų, kur yra šuolių. Autokoreliacija / dalinė autokoreliacija - yra reikšmingų lag'ų.
+
+Jei generuosime `ARCH(2)` daugiau lag'ų bus reikšmingų.
+
+
+<!-- str(dt) -->
+<!-- frequency(dt) -->
+<!-- start(dt) -->
+<!-- end(dt) -->
+
+
+Patikrinsime logaritminės grąžos kvadratų ACF ir PACF $R^{2}_{t}$:
+```{r}
+forecast::ggtsdisplay(DT_filtered$MCD.r.log^2, theme = theme_bw())
+```
+
+
+Atliekamas Ljung-Box testas:
+$H_{0}: \rho(1) = \ldots = \rho(h) = 0, h > 0$ \
+```{r}
+Box.test(DT_filtered$MCD.r.log, lag = 10)
+
+nortsTest::arch.test(DT_filtered$MCD.r.log^2, lag.max = 10)
+```
+
+Matome, kad visais atvejais p reikšmė < 0,05, todėl atmetame $H_{0}$ hipotezę, kad autokoreliacijos lygios nuliui. 
+Neatmetame hipotezės, kad log grąžos ($r^{2}$) yra autokoreliuotos.
+ARCH effektai - vidurkio liekanos autokoreliuotos, ir jų kvadratai - autokoreliuoti.
+
+
+Apskaičiuokime volatilumą $\hat{u_{t}^{2}}$ $\Delta\log(Y_{t}) = \alpha + u_{t}$
+
+```{r}
+mdl <- lm(diff(DT_filtered$MCD.r.log) ~ 1)
+u <- residuals(mdl)
+u2<- u^2
+plot.ts(data.frame(diff(DT_filtered$MCD.r.log), u2),
+main = "returns and volatility")
+```
+
+Mažas kintamumas stabiliais laikotarpiais.
+
+## Treniravimo ir testavimo aibės
+Laiko eilutė padalinama į treniravimo (80%) ir testavimo (likę 20%) imtis (originalūs duomenys - su trendu/sezoniškumu)
+
+Toliau dirbama su treniravimo imtimi.
+
+```{r}
+train_size <- floor(0.8 * nrow(DT_filtered))
+train_data <- DT_filtered[1:train_size, ]
+test_data <- DT_filtered[(train_size+1):nrow(DT_filtered), ]
+```
+
+
+Sezoniškumas:
+```{r}
+ts_data <- ts(train_data$MCD.r.log, frequency = 12)
+stl_data <- stl(ts_data, s.window = "periodic")
+
+plot(stl_data)
+
+seasonally_adjusted <- ts_data - stl_data$time.series[, "seasonal"]
+plot(ts(seasonally_adjusted, frequency = 12), main = "Seasonally Adjusted Data")
+```
+
+
+## Modelio sudarymas (vidurkio lygtis) - ARMA modelis
+Liekanos turėtų būti nekoreliuotos, turėti nulinį vidurkį ir pastovią dispersiją.
+
+`auto.arima`grąžina geriausią ARIMA modelį pagal AIC, AICc arba BIC vertę.
+
+```{r}
+fit_arma <- auto.arima(train_data[, MCD.r.log])
+summary(fit_arma)
+```
+Treniravimo imčiai sudarytas ARMA modelis, kuris tiksliausiai nusakytytų laiko eilutę pagal BIC kriterijų - ARIMA(5,0,5)
+
+Geriausiam ARMA modeliui pasirinkti, galima sudaryti algoritmą:
+```{r message=FALSE}
+aic_table = function(train_data,P,Q){
+  table = matrix(NA,(P+1),(Q+1))
+  for (p in 0:P){
+    for (q in 0:Q){
+      table[p+1,q+1] = arima(train_data,order=c(p,0,q))$aic
+    }
+  }
+  dimnames(table) = list(paste("<b> AR",0:P,"</b>",sep=""),paste("MA",0:Q,sep=""))
+  table
+}
+ret_aic_table = aic_table(train_data$MCD.r.log,5,5)
+require(knitr)
+kable(ret_aic_table,digits=2)
+```
+Iš lentelės matome, kad ARMA(5,0,5) turi mažiausią AIC. Taigi pasirinksime ARMA(5,0,5).
+Tačiau šis modelis yra sudėtingas, todėl gali kilti tokių problemų kaip overfitting, numerical stability ir kt.
+
+Modelis:
+$r_{t} = \mu + \phi_{1}r_{t-1} + \ldots + \phi_{5}r_{t-5} +  \epsilon_{t} + \theta_{1}r_{t-1} + \ldots + \theta_{5}r_{t-5}$
+
+## Modelio liekanų analizė:
+Tikrinama ar liekanos autokoreliuotos:
+```{r}
+residuals_arma <- residuals(fit_arma)
+acf(residuals_arma)
+
+par(mfrow = c(1,3))
+forecast::Acf(fit_arma$residuals)
+forecast::Acf(fit_arma$residuals^2)
+forecast::Pacf(fit_arma$residuals^2)
+```
+
+Matome, kad liekanų ACF ir kvadratinės liekanos yra autokoreliuotos. Taigi turime sudaryti vidurkio modelio liekanoms(volatilumo/dispersijos lygtis).
+
+Tikrinama ar liekanoms būdingi ARCH efektai: \
+$H_{0}:$ liekanose nėra ARCH efektų \
+$H_{A}:$ liekanoms būdingi ARCH efektai \
+
+```{r}
+ArchTest(residuals_arma)
+```
+Kadangi p reikšmė < 0.05, atmetame $H_{0}$ hipotezę. Vadinasi, liekanoms būdingi ARCH efektai.
+
+## Modelio sudarymas vidurkio modelio liekanoms(volatilumo/dispersijos lygtis)
+
+```{r}
+garch_spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+                         mean.model = list(armaOrder = c(5, 5), include.mean = TRUE))
+
+garch_fit <- ugarchfit(spec = garch_spec, data = fit_arma$residuals)
+summary(garch_fit)
+garch_fit
+```
+
+## Volatilumo lygties standartizuotų liekanų analizė
+Jei $u_{t}=\sigma_{t}\epsilon_{t} ∼ N(0,\sigma^{2}_{t})$, tai $u_{t}/\sigma_{t}∼N(0,1)$.
+Standartizuojame liekanas ir patikriname, ar joms būdingi ARCH efektai:
+
+```{r}
+std_resid <- residuals(garch_fit, standardize = TRUE)
+acf(std_resid)
+ArchTest(std_resid)
+```
+```{r}
+ggtsdisplay(garch_fit@fit$residuals / garch_fit@fit$sigma, theme = theme_bw())
+```
+
+Kadangi p reikšmė > 0.05, nėra pagrindo atmesti $H_{0}$ hipotezę. Vadinasi, liekanoms nėra būdingi ARCH efektai.
+
+## Jungtinio modelio sudarymas
+
+```{r}
+joint_spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+                         mean.model = list(armaOrder = c(5, 5), include.mean = TRUE))
+
+joint_fit <- ugarchfit(spec = joint_spec, data = train_data[, MCD.r.log])
+summary(joint_fit)
+
+```
+
+Galutinis modelis yra ARMA(5,5) - ARCH(1,1):
+
+## Jungtinio modelio liekanų analizė
+```{r}
+joint_residuals <- residuals(joint_fit, standardize = TRUE)
+acf(joint_residuals)
+ArchTest(joint_residuals)
+```
+Kadangi ARCH LM-test p reikšmė = 0.9659 > 0.05, rodo kad ARCH efektų liekanose nebėra.
+
+Taigi, mūsų įvertintas modelis yra teisingai apibrėžtas ta prasme, kad ACF/PACF autokoreliacija yra palyginti silpna.
+
+## Volatilumo prognozės 
+```{r}
+joint_forecast <- ugarchforecast(joint_fit, n.ahead = nrow(test_data))
+predicted_volatility <- sigma(joint_forecast)
+
+actual_returns <- test_data[, MCD.r.log]
+
+```
+
+```{r}
+plot(test_data$time, actual_returns, type = 'l', col = 'blue', main = "Actual Returns vs Predicted Volatility", xlab = "Time", ylab = "Value")
+lines(test_data$time, predicted_volatility, col = 'red')
+legend("topright", legend = c("Actual Returns", "Predicted Volatility"), col = c("blue", "red"), lty = 1)
+
+```
+
+Apskaičiuojama faktinės grąžos standartinis nuokrypis testavimo aibėje
+```{r}
+actual_volatility <- sd(actual_returns, na.rm = TRUE)
+predicted_volatility_mean <- mean(predicted_volatility, na.rm = TRUE)
+
+cat("Faktinis volatilumas (grąžos standartinis nuokrypis):", actual_volatility, "\n")
+cat("Prognozuotas volatilumas (prognozuoto sigma vidurkis):", predicted_volatility_mean, "\n")
+
+if (predicted_volatility_mean > actual_volatility) {
+  cat("Modelis prognozuoja didesnę riziką lyginant su faktiniu volatilumu.\n")
+} else {
+  cat("Modelis prognozuoja mažesnę riziką lyginant su faktiniu volatilumu.\n")
+}
+
+```
+
+<!-- summary(predicted_volatility) -->
