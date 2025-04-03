@@ -1,7 +1,7 @@
 # Time-Series
 [English below]
 ## Laiko eilutės
-Patalpintas Laiko eilutės (angl. *Time-Series*) kurso projektas, įgyvendintas panaudojant `R Markdown`. Faile `laiko_eiluciu_uzd.html` pateiktas projekto užduoties aprašymas, o `laiko_eiluciu_spr.html` ir `laiko_eiluciu_spr.Rmd` pateiktas užduoties sprendimas `.html` ir `.Rmd` formatu.
+Patalpintas Laiko eilutės (angl. *Time-Series*) kurso projektas, įgyvendintas panaudojant `R Markdown`, kuriame analizuojamos Mcdonald’s Corp. (MCD) logaritmuotos grąžos. Faile `laiko_eiluciu_uzd.html` pateiktas projekto užduoties aprašymas, o `laiko_eiluciu_spr.html` ir `laiko_eiluciu_spr.Rmd` pateiktas užduoties sprendimas `.html` ir `.Rmd` formatu.
 
 ### Uždavinių motyvacija
 2020 m. akcijų rinkos kritimas prasidėjo 2020 m. vasario 20 d. dėl investuotojų nerimo dėl COVID-19 epidemijos pasekmių. Šie investuotojų lūkesčiai aiškiai atsispindi vertybinių popierių biržose prekiaujamų akcijų uždarymo kainose.
@@ -23,7 +23,7 @@ Projekte įgyvendinta:
 
 -------------
 ## Time-Series
-This is a project for a *Time-Series* course using `R Markdown`. The file `laiko_eiluciu_uzd.html` contains the description of the project task, while `laiko_eiluciu_spr.html` and `laiko_eiluciu_spr.Rmd` contain the solution to the task in `.html` and `.Rmd` formats.
+This is a project for a *Time-Series* course using `R Markdown` and analysing Mcdonald’s Corp. (MCD) logarithmic returns. The file `laiko_eiluciu_uzd.html` contains the description of the project task, while `laiko_eiluciu_spr.html` and `laiko_eiluciu_spr.Rmd` contain the solution to the task in `.html` and `.Rmd` formats.
 
 ### Motivation
 The 2020 stock market crash started on 20 February 2020 due to investor concerns about the consequences of the COVID-19 epidemic. These investor expectations are clearly reflected in the closing prices of shares traded on stock exchanges.
